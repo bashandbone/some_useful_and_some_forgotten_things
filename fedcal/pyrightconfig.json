@@ -1,0 +1,7 @@
+{
+	"typeCheckingMode": "standard",
+	"deprecateTypingAliases": true,
+	"reportRedeclaration": true,
+	"reportConstantDefinition": true,
+	"reportUnhashable": true
+}

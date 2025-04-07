@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "fedcal"
+version = "0.1.0"
+description = "A feature-rich Python calendar that enables time series analysis of changes and schedules of the federal workforce and shifts in executive department funding status using Pandas native objects"
+authors = ["Adam Poulemanos"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+pandas = "^2.1.4"
+attrs = "^23.1.0"
+numpy = "^1.26.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

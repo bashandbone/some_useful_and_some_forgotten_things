@@ -1,0 +1,287 @@
+#!/bin/bash
+# Shell script to build ffmpeg and related libraries on Fedora
+# Assumes nvidia drivers are installed and working and you have a compatible GPU
+
+# This script is based on the guide at https://trac.ffmpeg.org/wiki/CompilationGuide/Centos
+
+display_help() {
+  echo "Usage: $0 [-i] [-u] [-h]"
+  echo
+  echo "Build ffmpeg and related libraries on Fedora"
+  echo "Requires sudo to install packages"
+  echo "Requires nvidia GPU and non-free drivers already installed"
+  echo "Will install ffmpeg and related libraries to ~/bin and ~/ffmpeg_build"
+  echo "Will download sources to ~/ffmpeg_sources"
+  echo "Will build with nasm, yasm, x264, x265, fdk-aac, SVT-AV1, dav1d, lame, opus, libvpx, libvdpau, nv-codec-headers"
+  echo 
+  echo "Options:"
+  echo "  -i  Install ffmpeg and related libraries"
+  echo "  -u  Update ffmpeg and related libraries"
+  echo "  -h  Display help"
+  exit 0
+}
+
+declare -g INSTALL UPDATE BUILDDIR SOURCESDIR PROCS PACKAGES PYTHON_PACKAGES NASM_VERSION YASM_VERSION LAME_VERSION OPUS_VERSION VDPAU_VERSION
+
+
+while getopts ":iuh" opt; do
+  case ${opt} in
+    i ) INSTALL=true
+      ;;
+    u ) UPDATE=true
+      ;;
+    h )
+      echo "Usage: $0 [-h]"
+      echo "  -h  Display help"
+      exit 0
+      ;;
+    \? )
+      echo "Invalid Option: -$OPTARG" 1>&2
+      exit 1
+      ;;
+  esac
+done
+
+INSTALL="${INSTALL:-}"
+UPDATE="${UPDATE:-}"
+
+BIN="${HOME}/bin"
+BUILDDIR="${HOME}/ffmpeg_build"
+SOURCESDIR="${HOME}/ffmpeg_sources"
+PYTHON_PACKAGES=(pip meson)
+PACKAGES=(autoconf automake bzip2 bzip2-devel cmake freetype-devel gcc gcc-c++ git libtool make pkgconfig zlib-devel mesa-va-drivers mesa-vdpau-drivers mesa-vulkan-drivers mesa-libGLw mesa-libOpenCL mesa-libOSMesa-devel mesa-libGL-devel mesa-libGLw-devel mesa-libGLU-devel mesa-libd3d-devel mesa-libgbm-devel mesa-libglapi mesa-libxatracker-devel mesa-filesystem libva libva-devel libva-utils libva-vdpau-driver ninja-build python3 python3-pip)
+PROCS=$(nproc)
+
+NASM_VERSION="2.16.02"
+YASM_VERSION="1.3.0"
+LAME_VERSION="3.100"
+OPUS_VERSION="1.3.1"
+VDPAU_VERSION="1.5"
+
+declare -g -A GIT_BRANCHES=(
+  [x264]="stable"
+  [x265]="stable"
+  [fdk-aac]="master"
+  [SVT-AV1]="master"
+  [dav1d]="master"
+  [libvpx]="main"
+  [nv-codec-headers]="main"
+)
+
+declare -g -a UPDATE_LIBS=("x264" "x265" "fdk-aac" "SVT-AV1" "dav1d" "libvpx" "nv-codec-headers" "ffmpeg")
+
+declare -g -A SOURCES=(
+  [nasm]="https://www.nasm.us/pub/nasm/releasebuilds/${NASM_VERSION}/nasm-${NASM_VERSION}.tar.bz2"
+  [yasm]="https://www.tortall.net/projects/yasm/releases/yasm-${YASM_VERSION}.tar.gz"
+  [x264]="https://code.videolan.org/videolan/x264.git" # stable branch
+  [x265]="https://bitbucket.org/multicoreware/x265_git" # stable branch
+  [fdk-aac]="https://github.com/mstorsjo/fdk-aac" # master branch
+  [SVT-AV1]="https://gitlab.com/AOMediaCodec/SVT-AV1.git"
+  [dav1d]="https://code.videolan.org/videolan/dav1d.git"
+  [lame]="https://downloads.sourceforge.net/project/lame/lame/${LAME_VERSION}/lame-${LAME_VERSION}.tar.gz"
+  [opus]="https://archive.mozilla.org/pub/opus/opus-${OPUS_VERSION}.tar.gz"
+  [libvpx]="https://chromium.googlesource.com/webm/libvpx.git"
+  [libvdpau]="https://gitlab.freedesktop.org/vdpau/libvdpau/-/archive/${VDPAU_VERSION}/libvdpau-${VDPAU_VERSION}.tar.gz"
+  [nv-codec-headers]="https://git.videolan.org/git/ffmpeg/nv-codec-headers.git"
+  [ffmpeg]="https://ffmpeg.org/releases/ffmpeg-snapshot.tar.bz2"
+)
+
+declare -g MAKE_INSTALL CONFIG_BIND CONFIG_BUILD
+MAKE_INSTALL="make -j${PROCS} && make -j${PROCS} install"
+CONFIG_BUILD="./configure --prefix=${BUILDDIR}"
+CONFIG_BIND="${CONFIG_BUILD} --bindir=${BIN}"
+
+
+to_dir() {
+    local dir=$1
+    cd "$dir" || error_exit "Failed to cd to $dir, exiting"
+}
+
+declare -g -a FFMPEG_CONFIG_FLAGS=("--prefix=${BUILDDIR}" "--pkg-config-flags='--static'" "--extra-cflags='-I${BUILDDIR}/include -march=native'" "--extra-ldflags='-L${BUILDDIR}/lib'" "--extra-libs=-lpthread" "--extra-libs=-lm" "--bindir=${BIN}" "--enable-gpl" "--enable-libfdk_aac" "--enable-libfreetype" "--enable-libharfbuzz" "--enable-libmp3lame" "--enable-libopus" "--enable-cuda-llvm" "--enable-ffnvcodec" "--enable-libvpx" "--enable-libx264" "--enable-libx265" "--enable-nonfree" "--enable-vaapi" "--enable-vdpau" "--enable-vulkan")
+
+declare -g -A PIPELINE=(
+    [nasm]="./autogen.sh && ${CONFIG_BIND} && ${MAKE_INSTALL}"
+    [yasm]="${CONFIG_BIND} && ${MAKE_INSTALL}"
+    [x264]="PKG_CONFIG_PATH=${BUILDDIR}/lib/pkgconfig ${CONFIG_BIND} --enable-static && ${MAKE_INSTALL}"
+    [x265]="to_dir build/linux && cmake -G 'Unix Makefiles' -DCMAKE_INSTALL_PREFIX=${BUILDDIR} -DENABLE_SHARED:bool=off ../../source && ${MAKE_INSTALL}"
+    [fdk-aac]="${CONFIG_BUILD} --disable-shared && ${MAKE_INSTALL}"
+    [SVT-AV1]="mkdir -p build && to_dir build && PATH=${BIN}:${PATH} cmake -G 'Unix Makefiles' -DCMAKE_INSTALL_PREFIX=${BUILDDIR} -DCMAKE_BUILD_TYPE=Release -DBUILD_DEC=OFF -DBUILD_SHARED_LIBS=OFF .. && PATH=${BIN}:${PATH} ${MAKE_INSTALL}"
+    [dav1d]="mkdir -p build && to_dir build && meson setup -Denable_tools=false -Denable_tests=false -Denable_examples=false --default_library=static .. --prefix=${BUILDDIR} --libdir=${BUILDDIR}/lib && ninja -j${PROCS} && ninja -j${PROCS} install"
+    [lame]="${CONFIG_BIND} --disable-shared --enable-nasm && ${MAKE_INSTALL}"
+    [opus]="${CONFIG_BUILD} --disable-shared && ${MAKE_INSTALL}"
+    [libvpx]="${CONFIG_BUILD} --disable-examples --disable-unit-tests && ${MAKE_INSTALL}"
+    [libvdpau]="meson setup builddir --prefix=${BUILDDIR} --libdir=lib && meson compile -C builddir && meson install -C builddir"
+    [nv-codec-headers]="${CONFIG_BUILD} --disable-shared && ${MAKE_INSTALL}"
+    [ffmpeg]="PATH=${BIN}:${PATH} PKG_CONFIG_PATH=${BUILDDIR}/lib/pkgconfig ./configure ${FFMPEG_CONFIG_FLAGS[@]} && ${MAKE_INSTALL} && hash -d ffmpeg"
+)
+
+error_exit() {
+  echo "$1" 1>&2
+  exit 1
+}
+
+if [ -z "$INSTALL" ] && [ -z "$UPDATE" ]; then
+  error_exit "No option selected, exiting"
+fi
+
+if [ -n "$INSTALL" ] && [ -n "$UPDATE" ]; then
+  # If both are set, we'll just do an install
+  INSTALL=true
+  UPDATE=false
+fi
+
+mkdir -p "${BIN}" "${BUILDDIR}" "${SOURCESDIR}"
+
+install_dependencies() {
+  echo "Installing required packages; we need sudo for this..."
+  sudo dnf install -y "${PACKAGES[@]}"
+}
+
+
+install_python_packages() {
+  echo "Installing required python packages..."
+  for package in "${PYTHON_PACKAGES[@]}"; do
+    python3 -m pip install --user "$package"
+    python3 -m pip install --user --upgrade "$package"
+  done
+}
+
+to_source_dir() {
+  cd "${SOURCESDIR}" || error_exit "Failed to cd to ${SOURCESDIR}, exiting"
+}
+
+is_tarball() {
+  local source=$1
+  if [[ "$source" == *bz2 || "$source" == *gz || "$source" == *tar* ]]; then
+    echo "true"
+  else
+    echo "false"
+  fi
+}
+
+get_source_type() {
+  local source=$1
+  local git_types=("git" "github" "googlesource" "gitlab" "bitbucket" "videolan")
+  local is_tarball
+  is_tarball=$(is_tarball "$source")
+    if [[ "$is_tarball" == "true" ]]; then
+        echo "curl"
+        return
+    fi
+  for type in "${git_types[@]}"; do
+    if [[ "$source" == *"$type"* ]]; then
+      echo "git"
+    else
+      echo "curl"
+    fi
+  done
+}
+
+extract_source() {
+    source=$1
+    local tarball extension extracted_dir dir
+    tarball=$(basename "$source")
+    extension="${tarball##*.}"
+    case $extension in
+        "bz2")
+        tar xjvf "$tarball"
+        ;;
+        "gz")
+        tar xzvf "$tarball"
+        ;;
+        "tar")
+        tar xf "$tarball"
+        ;;
+    esac
+    extracted_dir=$(basename "$tarball")
+    # We wouldn't want to run this on a few things, but 
+    # none of them are tarballs
+    dir="${extracted_dir/-*/}"
+    if [ "$dir" != "$extracted_dir" ]; then
+        mv "$extracted_dir" "$dir"
+    fi
+    echo "$dir"
+}
+
+get_source() {
+    local source=$1
+    local source_key="${2:-NONE}"
+    local type is_tarball dir
+  to_source_dir
+  type=$(get_source_type "$source")
+    case $type in
+        "git")
+        if [ "$source_key" != "NONE" ]; then
+          git clone --depth 1 --branch "${GIT_BRANCHES[$source_key]}" "$source"
+        else
+          git clone --depth 1 "$source"
+        fi
+        ;;
+        "curl")
+        curl -O -L "$source"
+        ;;
+    esac
+    is_tarball=$(is_tarball "$source")
+    if [[ "$is_tarball" == "true" ]]; then
+        dir=$(extract_source "$source")
+    else
+        dir=$(basename "$source")
+        dir="${dir/.git/}"
+    fi
+  
+    echo "$dir"
+}
+
+build_pkg() {
+    local pkg=$1
+    local pipeline
+    pipeline="${PIPELINE[$pkg]}"
+    echo "building $pkg"
+    if [ -z "$pipeline" ]; then
+        error_exit "No pipeline found for $pkg, exiting"
+    fi
+    to_dir "${SOURCESDIR}/${pkg}"
+    eval "$pipeline"
+}
+
+update_dirs() {
+    rm -rf "${BIN}{ffmpeg,ffprobe,lame,x264,x265}" "${BUILDDIR}"
+    for lib in "${UPDATE_LIBS[@]}"; do
+        to_dir "${SOURCESDIR}/${lib}"
+        if [ -d "build" ]; then
+            rm -rf build
+        fi
+        if [ -d "builddir" ]; then
+            rm -rf builddir
+        fi
+        if [ -f "Makefile" ]; then
+            make distclean
+        fi
+        if [ -d ".git" ]; then
+            git checkout .
+            git clean -fd
+            git pull
+        fi
+    done
+}
+
+main() {
+  if [ "$INSTALL" == true ]; then
+    install_dependencies
+    install_python_packages
+    for src in "${!SOURCES[@]}"; do
+      local dir
+      dir=$(get_source "${SOURCES[$src]}" "$src")
+      to_dir "$dir" 
+      build_pkg "$dir" # dir is also the key to PIPELINE
+    done
+    exit 0
+  fi # if we're still around we're updating...
+  update_dirs
+  for lib in "${UPDATE_LIBS[@]}"; do
+    to_dir "${SOURCESDIR}/${lib}"
+    build_pkg "$lib"
+  done
+}
+
+main
